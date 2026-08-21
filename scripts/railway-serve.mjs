@@ -93,11 +93,30 @@ function forwardHeaders(headers) {
 }
 
 const harnessEntry = fileURLToPath(new URL('../apps/cli/lib/bin.js', import.meta.url))
+const mercuryPatch = fileURLToPath(new URL('./railway-mercury-mcp.cordis.yml', import.meta.url))
+
+/**
+ * Launcher overlays applied ahead of the profile.
+ *
+ * The Mercury CRM overlay is applied only when both its URL and token are
+ * present: the row resolves `process.env` at load, so mounting it without
+ * credentials would fail the boot rather than degrade to a harness without
+ * Mercury tools. `--patch` is a launcher flag and must precede `--profile`;
+ * the `dsh web` alias rejects it outright.
+ */
+const patchArgs = process.env.MERCURY_MCP_URL && process.env.MERCURY_MCP_TOKEN
+  ? ['--patch', mercuryPatch]
+  : []
+if (patchArgs.length === 0) {
+  console.log('railway-serve: Mercury MCP not configured (MERCURY_MCP_URL/MERCURY_MCP_TOKEN unset); serving without it')
+}
+
 const harness = spawn(
   process.execPath,
   [
     harnessEntry,
-    'web',
+    ...patchArgs,
+    '--profile', 'web',
     '--host', HARNESS_HOST,
     '--port', String(HARNESS_PORT),
     '--no-open',
@@ -110,6 +129,54 @@ harness.on('exit', (code, signal) => {
   console.error(`railway-serve: harness exited (code=${code} signal=${signal}); stopping`)
   process.exit(code ?? 1)
 })
+
+/**
+ * Report whether the configured Mercury MCP server is reachable and accepts the
+ * token, once, at startup.
+ *
+ * The MCP client connects lazily and reports nothing on failure, so without this
+ * a wrong URL or a token that failed to resolve looks identical to a healthy
+ * deployment until someone asks the model for a Mercury tool. This only
+ * observes: it never blocks serving and never changes the harness's own
+ * connection.
+ *
+ * @returns Nothing; the outcome is written to the deploy log.
+ */
+async function probeMercury() {
+  const url = process.env.MERCURY_MCP_URL
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        accept: 'application/json, text/event-stream',
+        authorization: `Bearer ${process.env.MERCURY_MCP_TOKEN}`,
+      },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'initialize',
+        params: {
+          protocolVersion: '2025-06-18',
+          capabilities: {},
+          clientInfo: { name: 'railway-serve-probe', version: '1' },
+        },
+      }),
+      signal: AbortSignal.timeout(15_000),
+    })
+    const body = await response.text()
+    const verdict = response.ok && body.includes('"result"')
+      ? 'ok'
+      : response.status === 401 || response.status === 403
+        ? 'REJECTED — check MERCURY_MCP_TOKEN'
+        : 'UNEXPECTED RESPONSE'
+    console.log(`railway-serve: mercury MCP probe ${url}: HTTP ${response.status} ${verdict}`)
+  } catch (error) {
+    console.error(`railway-serve: mercury MCP probe ${url}: UNREACHABLE (${error.message})`)
+  }
+}
+
+if (patchArgs.length > 0) void probeMercury()
 
 const server = http.createServer((req, res) => {
   if (req.url === HEALTH_PATH) {

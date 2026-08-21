@@ -1,0 +1,19 @@
+# Mercury CRM MCP server, mounted on the Railway deployment as a --patch overlay.
+#
+# scripts/railway-serve.mjs passes this file only when both MERCURY_MCP_URL and
+# MERCURY_MCP_TOKEN are set, so a deployment without Mercury credentials boots
+# the harness unchanged instead of failing on an unreachable server.
+#
+# The upstream server (danielnguyenfinhub/mercury-mcp-v3) serves MCP Streamable
+# HTTP at POST /mcp and accepts the static MCP_AUTH_SECRET as either
+# `Authorization: Bearer` or `x-mcp-key`. The secret stays in the environment;
+# never write it into this file.
+- insert:
+    - id: mercury-crm-mcp
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: mercury
+        transport: streamable-http
+        url: !!js process.env.MERCURY_MCP_URL
+        headers:
+          Authorization: !!js '`Bearer ${process.env.MERCURY_MCP_TOKEN}`'
